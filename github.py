@@ -1,168 +1,158 @@
 import os
-import time
 import requests
-import platform
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-
 
 class GitHubAgent:
-    def __init__(self, token=None, use_browser=False, chrome_profile="Default"):
+    def __init__(self, token):
+        if not token:
+            raise ValueError("A GitHub token must be provided.")
         self.token = token
-        self.use_browser = use_browser
-        self.chrome_profile = chrome_profile
-        self.driver = None  # Initialize driver as None
+        self.base_url = "https://api.github.com"
+        self.headers = {
+            "Authorization": f"token {self.token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
 
-        if token:
-            self.headers = {
-                "Authorization": f"token {token}",
-                "Accept": "application/vnd.github.v3+json",
-            }
+    def star_repository(self, owner, repo):
+        """Star a repository using the GitHub API."""
+        url = f"{self.base_url}/user/starred/{owner}/{repo}"
+        response = requests.put(url, headers=self.headers)
+        if response.status_code == 204:
+            print(f"✅ Successfully starred the repository {owner}/{repo}.")
+        elif response.status_code == 304:
+            print(f"⚠️ Repository {owner}/{repo} is already starred.")
+        else:
+            print(f"❌ Failed to star repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
 
-        if use_browser:
-            self._init_browser()  # ✅ Call browser initialization
-
-    def _get_chrome_user_data_dir(self):
-        """Get Chrome user data directory based on OS"""
-        system = platform.system()
-        if system == "Windows":
-            return os.path.join(
-                os.environ["LOCALAPPDATA"], "Google", "Chrome", "User Data"
-            )
-        elif system == "Darwin":
-            return os.path.expanduser("~/Library/Application Support/Google/Chrome")
-        else:  # Linux
-            return os.path.expanduser("~/.config/google-chrome")
-
-    def _init_browser(self):
-        """Initialize Chrome browser with specified profile"""
-        options = webdriver.ChromeOptions()
-
-        # Configure profile settings
-        user_data_dir = self._get_chrome_user_data_dir()
-        options.add_argument(f"--user-data-dir={user_data_dir}")
-        options.add_argument(f"--profile-directory={self.chrome_profile}")
-
-        # Additional options for better stability
-        options.add_argument("--no-first-run")
-        options.add_argument("--no-default-browser-check")
-        options.add_argument("--disable-dev-shm-usage")
-
-        try:
-            self.driver = webdriver.Chrome(options=options)
-            self.driver.maximize_window()
-            print("✅ Chrome WebDriver initialized successfully")
-        except Exception as e:
-            print(f"❌ Failed to initialize Chrome WebDriver: {e}")
-            self.driver = None
-
-    def _search_and_star_browser(self, owner, repo):
-        """Browser automation to search and star a repository"""
-
-        if self.driver is None:
-            print("❌ Error: WebDriver is not initialized")
-            return
-
-        print(f"🔍 Searching for {owner}/{repo} on GitHub...")
-        self.driver.get(f"https://github.com/{owner}/{repo}")
-
-        try:
-            star_button = self.driver.find_element(
-                "xpath", "//button[contains(@aria-label, 'Star')]"
-            )
-
-            if "Star" in star_button.text:
-                star_button.click()
-                print(f"✅ Starred {owner}/{repo} via browser")
-            else:
-                print("⚠️ Repository already starred")
-
-        except Exception as e:
-            print(f"❌ Error during GitHub automation: {e}")
-
-    def close(self):
-        """Close the WebDriver if it's open"""
-        if self.driver:
-            self.driver.quit()
-            print("🚪 Closed the browser.")
+    def unstar_repository(self, owner, repo):
+        """Unstar a repository using the GitHub API."""
+        url = f"{self.base_url}/user/starred/{owner}/{repo}"
+        response = requests.delete(url, headers=self.headers)
+        if response.status_code == 204:
+            print(f"✅ Successfully unstarred the repository {owner}/{repo}.")
+        else:
+            print(f"❌ Failed to unstar repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
 
     def create_repository(self, name, description="", scope="public", add_readme=False):
+        """Create a new repository using the GitHub API."""
+        url = f"{self.base_url}/user/repos"
+        is_private = True if scope == "private" else False
+        payload = {
+            "name": name,
+            "description": description,
+            "private": is_private,
+            "auto_init": add_readme  # Initializes the repo with a README if True.
+        }
+        response = requests.post(url, json=payload, headers=self.headers)
+        if response.status_code == 201:
+            print(f"✅ Repository '{name}' created successfully.")
+        else:
+            print(f"❌ Failed to create repository '{name}'. Status Code: {response.status_code}, Response: {response.text}")
 
-        if self.driver is None:
-            print("❌ Error: WebDriver is not initialized")
-            return
+    def list_repositories(self):
+        """List repositories for the authenticated user."""
+        url = f"{self.base_url}/user/repos"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 200:
+            repos = response.json()
+            if repos:
+                print("Your repositories:")
+                for repo in repos:
+                    visibility = "Private" if repo['private'] else "Public"
+                    print(f"- {repo['full_name']} ({visibility})")
+            else:
+                print("No repositories found.")
+        else:
+            print(f"❌ Failed to fetch repositories. Status Code: {response.status_code}, Response: {response.text}")
 
-        try:
-            self.driver.get("https://github.com/")
-            create_repo_btn = self.driver.find_element(
-                "xpath", "//button[@id='global-create-menu-anchor']"
-            )
-            create_repo_btn.click()
+    def delete_repository(self, owner, repo):
+        """Delete a repository using the GitHub API."""
+        url = f"{self.base_url}/repos/{owner}/{repo}"
+        response = requests.delete(url, headers=self.headers)
+        if response.status_code == 204:
+            print(f"✅ Repository {owner}/{repo} deleted successfully.")
+        else:
+            print(f"❌ Failed to delete repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
 
-            create_repo_link = self.driver.find_element("xpath", "//a[@href='/new']")
-            create_repo_link.click()
+    def get_repository_details(self, owner, repo):
+        """Retrieve details of a repository using the GitHub API."""
+        url = f"{self.base_url}/repos/{owner}/{repo}"
+        response = requests.get(url, headers=self.headers)
+        if response.status_code == 200:
+            details = response.json()
+            print(f"Repository: {details['full_name']}")
+            print(f"Description: {details.get('description', 'No description provided.')}")
+            print(f"Visibility: {'Private' if details['private'] else 'Public'}")
+            print(f"Stars: {details.get('stargazers_count', 0)}")
+            print(f"Forks: {details.get('forks_count', 0)}")
+        else:
+            print(f"❌ Failed to get details for {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
 
-            time.sleep(3)
-            repo_name = self.driver.find_element(
-                "xpath",
-                "//input[@type='text'][contains(@aria-describedby, 'RepoNameInput')]",
-            )
-            print(repo_name.text)
-            repo_name.send_keys(name)
+    def fork_repository(self, owner, repo):
+        """Fork a repository using the GitHub API."""
+        url = f"{self.base_url}/repos/{owner}/{repo}/forks"
+        response = requests.post(url, headers=self.headers)
+        if response.status_code in (202, 201):
+            print(f"✅ Repository {owner}/{repo} forked successfully.")
+        else:
+            print(f"❌ Failed to fork repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
 
-            repo_desc = self.driver.find_element(
-                "xpath", "//input[@name='Description']"
-            )
-            repo_desc.send_keys(description)
+def main():
+    token = os.getenv("GITHUB_TOKEN")
+    if not token:
+        raise ValueError("GITHUB_TOKEN environment variable is not set.")
+    
+    agent = GitHubAgent(token=token)
+    
+    while True:
+        print("\nChoose an option:")
+        print("1. Create a repository")
+        print("2. Star a repository")
+        print("3. Unstar a repository")
+        print("4. List your repositories")
+        print("5. Delete a repository")
+        print("6. Get repository details")
+        print("7. Fork a repository")
+        print("8. Exit")
+        choice = input("Enter your choice (1-8): ").strip()
+        
+        match choice:
+            case "1":
+                name = input("Enter repository name: ").strip()
+                description = input("Enter repository description: ").strip()
+                scope = input("Enter repository scope (public/private): ").strip().lower()
+                add_readme = input("Initialize repository with README? (yes/no): ").strip().lower() == "yes"
+                agent.create_repository(name=name, description=description, scope=scope, add_readme=add_readme)
+            case "2":
+                owner = input("Enter repository owner: ").strip()
+                repo = input("Enter repository name: ").strip()
+                agent.star_repository(owner=owner, repo=repo)
+            case "3":
+                owner = input("Enter repository owner: ").strip()
+                repo = input("Enter repository name: ").strip()
+                agent.unstar_repository(owner=owner, repo=repo)
+            case "4":
+                agent.list_repositories()
+            case "5":
+                owner = input("Enter repository owner (your username): ").strip()
+                repo = input("Enter repository name: ").strip()
+                confirm = input(f"Are you sure you want to delete {owner}/{repo}? This action cannot be undone (yes/no): ").strip().lower()
+                if confirm == "yes":
+                    agent.delete_repository(owner=owner, repo=repo)
+                else:
+                    print("Deletion canceled.")
+            case "6":
+                owner = input("Enter repository owner: ").strip()
+                repo = input("Enter repository name: ").strip()
+                agent.get_repository_details(owner=owner, repo=repo)
+            case "7":
+                owner = input("Enter repository owner to fork from: ").strip()
+                repo = input("Enter repository name to fork: ").strip()
+                agent.fork_repository(owner=owner, repo=repo)
+            case "8":
+                print("Exiting...")
+                break
+            case _:
+                print("Invalid choice. Please select a number between 1 and 8.")
 
-            if scope == "private":
-                repo_visibility = self.driver.find_element(
-                    "xpath", "//input[@name='visibilityGroup'][@value='private']"
-                )
-                repo_visibility.click()
-
-            self.driver.execute_script(
-                "window.scrollTo(0, document.body.scrollHeight);"
-            )
-            time.sleep(2)
-            if add_readme:
-                repo_add_readme = self.driver.find_element(
-                    "xpath", "//input[@type='checkbox']"
-                )
-                repo_add_readme.click()
-
-            submit_btn = self.driver.find_element(
-                "xpath", "//button[@type='submit'][text()='Create repository']"
-            )
-            submit_btn.click()
-
-        except Exception as e:
-            print(f"❌ Error during GitHub automation: {e}")
-
-
-# Usage example
 if __name__ == "__main__":
-    # Choose between profiles (e.g., "Profile 1", "Profile 2", "Default")
-    selected_profile = "Profile 2"  # Change this to your desired profile
-
-    agent = GitHubAgent(
-        token=os.getenv("GITHUB_TOKEN"),  # API token (optional)
-        use_browser=True,
-        chrome_profile=selected_profile,
-    )
-
-    try:
-        agent.create_repository(
-            name="demo",
-            description="this is the demmo repo",
-            scope="private",
-            add_readme=True,
-        )
-
-        # agent._search_and_star_browser("vansh-potpose", "ai-agents")
-
-        time.sleep(5)  # Keep browser open for observation
-    finally:
-        agent.close()
+    main()
