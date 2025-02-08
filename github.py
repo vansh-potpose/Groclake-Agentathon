@@ -1,158 +1,298 @@
 import os
 import requests
+import json
+from flask import Flask, request, jsonify
+from groq import Groq
+from groclake.utillake import GrocAgent
 
-class GitHubAgent:
-    def __init__(self, token):
-        if not token:
-            raise ValueError("A GitHub token must be provided.")
-        self.token = token
+def call_groq_chat(prompt):
+    """
+    Calls the Groq API to perform a chat completion using streaming mode.
+    It accumulates the response chunks and returns the complete answer.
+    """
+    client = Groq()
+    messages = [
+        {"role": "system", "content": "You are a GitHub command parser. Output JSON."},
+        {"role": "user", "content": prompt},
+    ]
+    # Create a chat completion request (using streaming to collect the answer)
+    completion = client.chat.completions.create(
+        model="mixtral-8x7b-32768",
+        messages=messages,
+        temperature=1,
+        max_completion_tokens=1024,
+        top_p=1,
+        stream=True,
+        stop=None,
+    )
+    answer = ""
+    for chunk in completion:
+        # Each chunk is assumed to have a choices list with a delta dict containing "content"
+        delta = chunk.choices[0].delta
+        answer += delta.content if delta.content is not None else ""
+    return answer.strip()
+
+class GitHubAgent(GrocAgent):
+    def __init__(
+        self,
+        app,
+        agent_name,
+        initial_intent="github",
+        intent_description="Handles GitHub operations",
+        adaptor_config=None,
+    ):
+        if adaptor_config is None:
+            adaptor_config = {}
+        super().__init__(
+            app,
+            agent_name,
+            initial_intent,
+            intent_description,
+            self.default_handler,
+            adaptor_config,
+        )
+        self.token = os.getenv("GITHUB_TOKEN")
+        if not self.token:
+            raise ValueError("GITHUB_TOKEN environment variable is not set.")
         self.base_url = "https://api.github.com"
         self.headers = {
             "Authorization": f"token {self.token}",
             "Accept": "application/vnd.github.v3+json",
         }
 
-    def star_repository(self, owner, repo):
-        """Star a repository using the GitHub API."""
-        url = f"{self.base_url}/user/starred/{owner}/{repo}"
-        response = requests.put(url, headers=self.headers)
-        if response.status_code == 204:
-            print(f"✅ Successfully starred the repository {owner}/{repo}.")
-        elif response.status_code == 304:
-            print(f"⚠️ Repository {owner}/{repo} is already starred.")
-        else:
-            print(f"❌ Failed to star repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
+    def default_handler(self, payload):
+        try:
+            query_text = payload.get("query_text", "No query provided")
+            prompt = (
+                "Context: Available GitHub operations:\n"
+                "- create_repository: Create repo. Requires 'name' (string), optional 'description' (string), 'scope' (public/private), 'add_readme' (boolean).\n"
+                "- star_repository: Star a repo. Requires 'owner' (string), 'repo' (string).\n"
+                "- unstar_repository: Unstar a repo. Same parameters as star.\n"
+                "- list_repositories: List user's repos. No parameters.\n"
+                "- delete_repository: Delete a repo. Requires 'owner' and 'repo'.\n"
+                "- get_repository_details: Get repo info. Requires 'owner' and 'repo'.\n"
+                "- fork_repository: Fork a repo. Requires 'owner' and 'repo'.\n"
+                f"Command: {query_text}\n"
+                "Output a JSON object with 'operation' (exactly one of the above) and parameters.\n"
+                "Example 1: 'Create private repo test with README' -> {\"operation\": \"create_repository\", \"name\": \"test\", \"scope\": \"private\", \"add_readme\": true}\n"
+                "Example 2: 'Star octocat/hello' -> {\"operation\": \"star_repository\", \"owner\": \"octocat\", \"repo\": \"hello\"}\n"
+                "Output only the JSON, no markdown or additional text."
+            )
+            print(f"\nDEBUG: Prompt sent to Groq API:\n{prompt}\n")
 
-    def unstar_repository(self, owner, repo):
-        """Unstar a repository using the GitHub API."""
-        url = f"{self.base_url}/user/starred/{owner}/{repo}"
-        response = requests.delete(url, headers=self.headers)
-        if response.status_code == 204:
-            print(f"✅ Successfully unstarred the repository {owner}/{repo}.")
-        else:
-            print(f"❌ Failed to unstar repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
+            answer = call_groq_chat(prompt)
+            print(f"DEBUG: Groq API response: {answer}\n")
 
+            # Remove surrounding markdown code fences if present
+            if answer.startswith("```json"):
+                answer = answer[7:]
+            if answer.endswith("```"):
+                answer = answer[:-3]
+
+            instructions = json.loads(answer)
+            print(f"DEBUG: Parsed instructions: {instructions}\n")
+        except json.JSONDecodeError as e:
+            return {
+                "response_text": f"Failed to parse instructions: {str(e)}",
+                "status": 400,
+                "query_text": query_text,
+            }
+        except Exception as e:
+            return {
+                "response_text": f"Error processing command: {str(e)}",
+                "status": 500,
+                "query_text": query_text,
+            }
+
+        operation = instructions.get("operation")
+        if not operation:
+            return {
+                "response_text": "No operation specified in the instructions.",
+                "status": 400,
+                "query_text": query_text,
+            }
+
+        operation = operation.strip().lower()
+        response_text = "Unknown operation."
+        status = 400
+
+        try:
+            if operation == "create_repository":
+                name = instructions.get("name")
+                if not name:
+                    raise ValueError("Missing 'name' for repository creation.")
+                description = instructions.get("description", "")
+                scope = instructions.get("scope", "public").strip().lower()
+                add_readme = instructions.get("add_readme", False)
+                # Convert string booleans to actual booleans
+                if isinstance(add_readme, str):
+                    add_readme = add_readme.lower() == "true"
+                self.create_repository(name, description, scope, add_readme)
+                response_text = f"Repository '{name}' created successfully."
+                status = 200
+            elif operation == "star_repository":
+                owner = instructions.get("owner")
+                repo = instructions.get("repo")
+                if not owner or not repo:
+                    raise ValueError("Missing 'owner' or 'repo' for starring.")
+                self.star_repository(owner, repo)
+                response_text = f"Starred {owner}/{repo}."
+                status = 200
+            elif operation == "unstar_repository":
+                owner = instructions.get("owner")
+                repo = instructions.get("repo")
+                if not owner or not repo:
+                    raise ValueError("Missing 'owner' or 'repo' for unstarring.")
+                self.unstar_repository(owner, repo)
+                response_text = f"Unstarred {owner}/{repo}."
+                status = 200
+            elif operation == "list_repositories":
+                repos_output = self.list_repositories(return_output=True)
+                response_text = repos_output
+                status = 200
+            elif operation == "delete_repository":
+                owner = instructions.get("owner")
+                repo = instructions.get("repo")
+                if not owner or not repo:
+                    raise ValueError("Missing 'owner' or 'repo' for deletion.")
+                self.delete_repository(owner, repo)
+                response_text = f"Repository {owner}/{repo} deleted successfully."
+                status = 200
+            elif operation == "get_repository_details":
+                owner = instructions.get("owner")
+                repo = instructions.get("repo")
+                if not owner or not repo:
+                    raise ValueError("Missing 'owner' or 'repo' for getting details.")
+                details_output = self.get_repository_details(return_output=True, owner=owner, repo=repo)
+                response_text = details_output
+                status = 200
+            elif operation == "fork_repository":
+                owner = instructions.get("owner")
+                repo = instructions.get("repo")
+                if not owner or not repo:
+                    raise ValueError("Missing 'owner' or 'repo' for forking.")
+                self.fork_repository(owner, repo)
+                response_text = f"Repository {owner}/{repo} forked successfully."
+                status = 200
+            else:
+                response_text = f"Operation '{operation}' is not supported."
+                status = 400
+        except Exception as e:
+            response_text = f"Error executing operation: {str(e)}"
+            status = 500
+
+        return {
+            "response_text": response_text,
+            "status": status,
+            "query_text": query_text,
+        }
+
+    # --- GitHub operation methods ---
     def create_repository(self, name, description="", scope="public", add_readme=False):
-        """Create a new repository using the GitHub API."""
-        url = f"{self.base_url}/user/repos"
         is_private = True if scope == "private" else False
         payload = {
             "name": name,
             "description": description,
             "private": is_private,
-            "auto_init": add_readme  # Initializes the repo with a README if True.
+            "auto_init": add_readme,
         }
+        url = f"{self.base_url}/user/repos"
         response = requests.post(url, json=payload, headers=self.headers)
         if response.status_code == 201:
             print(f"✅ Repository '{name}' created successfully.")
         else:
-            print(f"❌ Failed to create repository '{name}'. Status Code: {response.status_code}, Response: {response.text}")
+            print(
+                f"❌ Failed to create repository '{name}'. Status Code: {response.status_code}, Response: {response.text}"
+            )
 
-    def list_repositories(self):
-        """List repositories for the authenticated user."""
+    def star_repository(self, owner, repo):
+        url = f"{self.base_url}/user/starred/{owner}/{repo}"
+        response = requests.put(url, headers=self.headers)
+        if response.status_code == 204:
+            print(f"✅ Successfully starred repository {owner}/{repo}.")
+        elif response.status_code == 304:
+            print(f"⚠️ Repository {owner}/{repo} is already starred.")
+        else:
+            print(
+                f"❌ Failed to star repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}"
+            )
+
+    def unstar_repository(self, owner, repo):
+        url = f"{self.base_url}/user/starred/{owner}/{repo}"
+        response = requests.delete(url, headers=self.headers)
+        if response.status_code == 204:
+            print(f"✅ Successfully unstarred repository {owner}/{repo}.")
+        else:
+            print(
+                f"❌ Failed to unstar repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}"
+            )
+
+    def list_repositories(self, return_output=False):
         url = f"{self.base_url}/user/repos"
         response = requests.get(url, headers=self.headers)
+        output = ""
         if response.status_code == 200:
             repos = response.json()
             if repos:
-                print("Your repositories:")
+                output += "Your repositories:\n"
                 for repo in repos:
-                    visibility = "Private" if repo['private'] else "Public"
-                    print(f"- {repo['full_name']} ({visibility})")
+                    visibility = "Private" if repo["private"] else "Public"
+                    output += f"- {repo['full_name']} ({visibility})\n"
             else:
-                print("No repositories found.")
+                output = "No repositories found."
         else:
-            print(f"❌ Failed to fetch repositories. Status Code: {response.status_code}, Response: {response.text}")
+            output = f"❌ Failed to fetch repositories. Status Code: {response.status_code}, Response: {response.text}"
+        if return_output:
+            return output
+        else:
+            print(output)
 
     def delete_repository(self, owner, repo):
-        """Delete a repository using the GitHub API."""
         url = f"{self.base_url}/repos/{owner}/{repo}"
         response = requests.delete(url, headers=self.headers)
         if response.status_code == 204:
             print(f"✅ Repository {owner}/{repo} deleted successfully.")
         else:
-            print(f"❌ Failed to delete repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
+            print(
+                f"❌ Failed to delete repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}"
+            )
 
-    def get_repository_details(self, owner, repo):
-        """Retrieve details of a repository using the GitHub API."""
+    def get_repository_details(self, return_output=False, owner=None, repo=None):
         url = f"{self.base_url}/repos/{owner}/{repo}"
         response = requests.get(url, headers=self.headers)
+        output = ""
         if response.status_code == 200:
             details = response.json()
-            print(f"Repository: {details['full_name']}")
-            print(f"Description: {details.get('description', 'No description provided.')}")
-            print(f"Visibility: {'Private' if details['private'] else 'Public'}")
-            print(f"Stars: {details.get('stargazers_count', 0)}")
-            print(f"Forks: {details.get('forks_count', 0)}")
+            output += f"Repository: {details['full_name']}\n"
+            output += f"Description: {details.get('description', 'No description provided.')}\n"
+            output += f"Visibility: {'Private' if details['private'] else 'Public'}\n"
+            output += f"Stars: {details.get('stargazers_count', 0)}\n"
+            output += f"Forks: {details.get('forks_count', 0)}\n"
         else:
-            print(f"❌ Failed to get details for {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
+            output = f"❌ Failed to get details for {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}"
+        if return_output:
+            return output
+        else:
+            print(output)
 
     def fork_repository(self, owner, repo):
-        """Fork a repository using the GitHub API."""
         url = f"{self.base_url}/repos/{owner}/{repo}/forks"
         response = requests.post(url, headers=self.headers)
         if response.status_code in (202, 201):
             print(f"✅ Repository {owner}/{repo} forked successfully.")
         else:
-            print(f"❌ Failed to fork repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}")
+            print(
+                f"❌ Failed to fork repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}"
+            )
 
-def main():
-    token = os.getenv("GITHUB_TOKEN")
-    if not token:
-        raise ValueError("GITHUB_TOKEN environment variable is not set.")
-    
-    agent = GitHubAgent(token=token)
-    
-    while True:
-        print("\nChoose an option:")
-        print("1. Create a repository")
-        print("2. Star a repository")
-        print("3. Unstar a repository")
-        print("4. List your repositories")
-        print("5. Delete a repository")
-        print("6. Get repository details")
-        print("7. Fork a repository")
-        print("8. Exit")
-        choice = input("Enter your choice (1-8): ").strip()
-        
-        match choice:
-            case "1":
-                name = input("Enter repository name: ").strip()
-                description = input("Enter repository description: ").strip()
-                scope = input("Enter repository scope (public/private): ").strip().lower()
-                add_readme = input("Initialize repository with README? (yes/no): ").strip().lower() == "yes"
-                agent.create_repository(name=name, description=description, scope=scope, add_readme=add_readme)
-            case "2":
-                owner = input("Enter repository owner: ").strip()
-                repo = input("Enter repository name: ").strip()
-                agent.star_repository(owner=owner, repo=repo)
-            case "3":
-                owner = input("Enter repository owner: ").strip()
-                repo = input("Enter repository name: ").strip()
-                agent.unstar_repository(owner=owner, repo=repo)
-            case "4":
-                agent.list_repositories()
-            case "5":
-                owner = input("Enter repository owner (your username): ").strip()
-                repo = input("Enter repository name: ").strip()
-                confirm = input(f"Are you sure you want to delete {owner}/{repo}? This action cannot be undone (yes/no): ").strip().lower()
-                if confirm == "yes":
-                    agent.delete_repository(owner=owner, repo=repo)
-                else:
-                    print("Deletion canceled.")
-            case "6":
-                owner = input("Enter repository owner: ").strip()
-                repo = input("Enter repository name: ").strip()
-                agent.get_repository_details(owner=owner, repo=repo)
-            case "7":
-                owner = input("Enter repository owner to fork from: ").strip()
-                repo = input("Enter repository name to fork: ").strip()
-                agent.fork_repository(owner=owner, repo=repo)
-            case "8":
-                print("Exiting...")
-                break
-            case _:
-                print("Invalid choice. Please select a number between 1 and 8.")
+app = Flask(__name__)
+github_agent = GitHubAgent(app, "GitHubAgent")
+
+@app.route("/agent", methods=["POST"])
+def agent_endpoint():
+    payload = request.get_json()
+    result = github_agent.default_handler(payload)
+    return jsonify(result)
 
 if __name__ == "__main__":
-    main()
+    app.run(host="0.0.0.0", port=5000)
