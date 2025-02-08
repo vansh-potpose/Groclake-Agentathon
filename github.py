@@ -13,10 +13,10 @@ load_dotenv()
 # Set your Groclake credentials and GitHub token.
 # (These can also be set in your .env file.)
 os.environ["GROCLAKE_API_KEY"] = os.getenv(
-    "GROCLAKE_API_KEY", "140f6969d5213fd0ece03148e62e461e"
+    "GROCLAKE_API_KEY", ""
 )
 os.environ["GROCLAKE_ACCOUNT_ID"] = os.getenv(
-    "GROCLAKE_ACCOUNT_ID", "72aea028970a23b6530c7faa987905e0"
+    "GROCLAKE_ACCOUNT_ID", ""
 )
 
 # Initialize the Groclake components. In a RAG task the vector & data lakes can be used
