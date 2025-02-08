@@ -1,15 +1,36 @@
-from flask import Flask, request, jsonify, render_template_string
 import os
-import requests
 import json
+import requests
+from flask import Flask, request, jsonify, render_template_string
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from groclake.utillake import GrocAgent
-from groq import Groq
-from dotenv import load_dotenv
+from groclake.modellake import ModelLake
 
-# Load environment variables from .env file
-load_dotenv()
+# --- Setup Environment Variables ---
+# These can be set externally or via a .env file.
+# For example:
+# os.environ['GROCLAKE_API_KEY'] = "140f6969d5213fd0ece03148e62e461e"
+# os.environ['GROCLAKE_ACCOUNT_ID'] = "72aea028970a23b6530c7faa987905e0"
+# os.environ['GROQ_API_KEY'] is not needed now.
+
+# --- Initialize ModelLake for LLM Integration ---
+modellake = ModelLake()
+
+def call_llm_chat(prompt):
+    """
+    Uses ModelLake's chat_complete method to process the prompt.
+    Returns the answer as a string.
+    """
+    chat_completion_request = {
+        "groc_account_id": os.environ.get("GROCLAKE_ACCOUNT_ID"),
+        "messages": [
+            {"role": "system", "content": "You are a photo command parser. Output valid JSON."},
+            {"role": "user", "content": prompt}
+        ]
+    }
+    response = modellake.chat_complete(chat_completion_request)
+    answer = response.get("answer", "").strip()
+    return answer
 
 # --- Google Photos API Setup ---
 SCOPES = [
@@ -47,13 +68,7 @@ def search_photos_by_tag_parameter(tag):
     creds = authenticate()
     url = "https://photoslibrary.googleapis.com/v1/mediaItems:search"
     headers = {"Authorization": f"Bearer {creds.token}"}
-    data = {
-        "filters": {
-            "contentFilter": {
-                "includedContentCategories": [tag]
-            }
-        }
-    }
+    data = {"filters": {"contentFilter": {"includedContentCategories": [tag]}}}
     response = requests.post(url, headers=headers, json=data)
     if response.status_code == 200:
         return response.json().get("mediaItems", [])
@@ -80,110 +95,62 @@ def list_albums():
         return response.json().get("albums", [])
     return None
 
-# --- LLM Integration using Groq ---
-def call_groq_chat(prompt):
-    """
-    Calls the Groq API to perform a chat completion using streaming mode.
-    It accumulates the response chunks and returns the complete answer.
-    """
-    groq_api_key = os.environ.get("GROQ_API_KEY")
-    if not groq_api_key:
-        raise ValueError("GROQ_API_KEY environment variable is not set.")
-    client = Groq(api_key=groq_api_key)
-    messages = [
-        {"role": "system", "content": "You are a photo command parser. Output valid JSON."},
-        {"role": "user", "content": prompt},
-    ]
-    completion = client.chat.completions.create(
-        model="mixtral-8x7b-32768",
-        messages=messages,
-        temperature=1,
-        max_completion_tokens=1024,
-        top_p=1,
-        stream=True,
-        stop=None,
-    )
-    answer = ""
-    for chunk in completion:
-        delta = chunk.choices[0].delta
-        answer += delta.content if delta.content is not None else ""
-    return answer.strip()
-
-# --- Photo Agent with LLM Integration ---
-class PhotoAgent(GrocAgent):
-    def __init__(self, app):
-        # Retrieve GROCLAKE_API_KEY from the environment and pass it via adaptor_config.
-        groclake_api_key = os.environ.get("GROCLAKE_API_KEY")
-        if not groclake_api_key:
-            raise ValueError("GROCLAKE_API_KEY environment variable is not set.")
-        adaptor_config = {"groclake_api_key": groclake_api_key}
-        super().__init__(app, "PhotoAgent", "photo_query", "Handles Google Photos queries", self.default_handler, adaptor_config=adaptor_config)
-    
+# --- Photo Agent Class ---
+# In this lean version we define our own PhotoAgent class without using a GrocAgent base.
+class PhotoAgent:
     def default_handler(self, payload):
         """
         Processes incoming requests.
         Expected payload contains:
           - query_text: A natural language command (e.g., "give me images of night")
-        Uses enhanced keyword matching and an LLM (via Groq) to convert the query into a structured command.
+        Uses enhanced keyword matching and the LLM (via ModelLake) to convert the query into a structured command.
         """
         try:
             query_text = payload.get("query_text", "").strip()
             lower_query = query_text.lower()
-            # Enhanced keyword matching with fuzzy checks for common typos.
-            if ("list photos" in lower_query or "list images" in lower_query):
+            # Enhanced keyword matching:
+            if "list photos" in lower_query or "list images" in lower_query:
                 operation = "list photos"
                 metadata = payload.get("metadata", {})
-            elif (("search photos" in lower_query or "search images" in lower_query or 
-                   "seach photos" in lower_query or "seach images" in lower_query) or 
-                  (("search" in lower_query or "seach" in lower_query) and 
-                   ("photo" in lower_query or "image" in lower_query))):
+            elif ("search photos" in lower_query or "search images" in lower_query or
+                  "seach photos" in lower_query or "seach images" in lower_query or
+                  (("search" in lower_query or "seach" in lower_query) and ("photo" in lower_query or "image" in lower_query))):
                 operation = "search photos"
                 metadata = payload.get("metadata", {})
-                # If no tag is provided, try to extract it from the query.
                 tag = metadata.get("tag", "")
                 if not tag:
                     phrase = "search images of "
                     if phrase in lower_query:
                         tag = lower_query.split(phrase)[-1].strip()
                         metadata["tag"] = tag
-            elif ("create album" in lower_query):
+            elif "create album" in lower_query:
                 operation = "create album"
                 metadata = payload.get("metadata", {})
-            elif ("list albums" in lower_query):
+            elif "list albums" in lower_query:
                 operation = "list albums"
                 metadata = payload.get("metadata", {})
             else:
-                # Use the LLM to parse the natural language query.
+                # Use LLM to parse the natural language query.
                 prompt = (
                     "Convert the following natural language query into a JSON command for a photo agent that supports "
                     "'list photos', 'search photos' (with tag), 'create album' (with album_name), and 'list albums'.\n"
                     f"Query: \"{query_text}\"\n"
                     "Return JSON with key 'operation' and include additional keys if needed. Output only valid JSON."
                 )
-                print(f"DEBUG: Prompt sent to Groq API:\n{prompt}\n")
-                llm_response = call_groq_chat(prompt)
-                print(f"DEBUG: Groq API response: {llm_response}\n")
-                if llm_response.startswith("```json"):
-                    llm_response = llm_response[7:]
-                if llm_response.endswith("```"):
-                    llm_response = llm_response[:-3]
+                print(f"DEBUG: Prompt sent to ModelLake:\n{prompt}\n")
+                llm_response = call_llm_chat(prompt)
+                print(f"DEBUG: ModelLake response: {llm_response}\n")
                 instructions = json.loads(llm_response)
                 print(f"DEBUG: Parsed instructions: {instructions}\n")
                 operation = instructions.get("operation", "").strip().lower()
-                metadata = {}
-                for key in ["tag", "album_name"]:
-                    if key in instructions:
-                        metadata[key] = instructions[key]
+                metadata = {k: instructions[k] for k in ["tag", "album_name"] if k in instructions}
             
-            # Process the structured operation.
+            # Process the structured command.
             if operation == "list photos":
                 photos = list_photos()
                 if photos is None:
                     return {"response_text": "Failed to fetch photos."}
-                photo_list = [
-                    {"filename": p.get("filename", "Unnamed"), "url": p.get("baseUrl", "")}
-                    for p in photos[:10]
-                ]
+                photo_list = [{"filename": p.get("filename", "Unnamed"), "url": p.get("baseUrl", "")} for p in photos[:10]]
                 return {"response_text": "Recent photos:", "photos": photo_list}
             elif operation == "search photos":
                 tag = metadata.get("tag", "")
@@ -192,10 +159,7 @@ class PhotoAgent(GrocAgent):
                 photos = search_photos_by_tag_parameter(tag)
                 if not photos:
                     return {"response_text": f"No photos found with tag '{tag}'."}
-                photo_list = [
-                    {"filename": p.get("filename", "Unnamed"), "url": p.get("baseUrl", "")}
-                    for p in photos
-                ]
+                photo_list = [{"filename": p.get("filename", "Unnamed"), "url": p.get("baseUrl", "")} for p in photos]
                 return {"response_text": f"Photos with tag '{tag}':", "photos": photo_list}
             elif operation == "create album":
                 album_name = metadata.get("album_name", "New Album")
@@ -207,10 +171,7 @@ class PhotoAgent(GrocAgent):
                 albums = list_albums()
                 if not albums:
                     return {"response_text": "No albums found."}
-                album_list = [
-                    {"title": a.get("title", "Unnamed"), "id": a.get("id", "")}
-                    for a in albums
-                ]
+                album_list = [{"title": a.get("title", "Unnamed"), "id": a.get("id", "")} for a in albums]
                 return {"response_text": "Your albums:", "albums": album_list}
             else:
                 return {"response_text": "Operation not recognized.", "query_text": query_text}
@@ -219,7 +180,7 @@ class PhotoAgent(GrocAgent):
 
 # --- Flask Application Setup ---
 app = Flask(__name__)
-photo_agent = PhotoAgent(app)
+photo_agent = PhotoAgent()
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -232,7 +193,7 @@ def index():
     <!DOCTYPE html>
     <html>
       <head>
-        <title>Google Photos GrocLake Agent with LLM</title>
+        <title>Google Photos Agent</title>
         <style>
           body { font-family: Arial, sans-serif; margin: 20px; }
           label { display: block; margin-top: 10px; }
@@ -240,7 +201,7 @@ def index():
         </style>
       </head>
       <body>
-        <h1>Google Photos GrocLake Agent with LLM</h1>
+        <h1>Google Photos Agent</h1>
         <form method="POST">
           <div class="field">
             <label for="command">Enter your command (e.g., "give me images of night"):</label>
