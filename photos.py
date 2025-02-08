@@ -216,9 +216,21 @@ def index():
         window.onload = toggleFields;
       </script>
       {% if response %}
-        <h2>Response:</h2>
-        <pre>{{ response|tojson(indent=2) }}</pre>
-      {% endif %}
+  <h2>Response:</h2>
+  {% if response.photos %}
+    <h3>Photos:</h3>
+    <div>
+      {% for photo in response.photos %}
+        <div style="display:inline-block; margin:10px; text-align:center;">
+          <img src="{{ photo.url }}" alt="{{ photo.filename }}" style="max-width:200px; max-height:200px;"><br>
+          <span>{{ photo.filename }}</span>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <pre>{{ response|tojson(indent=2) }}</pre>
+  {% endif %}
+{% endif %}
     </body>
     </html>
     '''
