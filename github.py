@@ -2,37 +2,52 @@ import os
 import requests
 import json
 from flask import Flask, request, jsonify
-from groq import Groq
-from groclake.utillake import GrocAgent
+from groclake.modellake import ModelLake
+from groclake.vectorlake import VectorLake
+from groclake.datalake import DataLake
+from dotenv import load_dotenv
 
-def call_groq_chat(prompt):
-    """
-    Calls the Groq API to perform a chat completion using streaming mode.
-    It accumulates the response chunks and returns the complete answer.
-    """
-    client = Groq()
-    messages = [
-        {"role": "system", "content": "You are a GitHub command parser. Output JSON."},
-        {"role": "user", "content": prompt},
-    ]
-    # Create a chat completion request (using streaming to collect the answer)
-    completion = client.chat.completions.create(
-        model="mixtral-8x7b-32768",
-        messages=messages,
-        temperature=1,
-        max_completion_tokens=1024,
-        top_p=1,
-        stream=True,
-        stop=None,
-    )
-    answer = ""
-    for chunk in completion:
-        # Each chunk is assumed to have a choices list with a delta dict containing "content"
-        delta = chunk.choices[0].delta
-        answer += delta.content if delta.content is not None else ""
-    return answer.strip()
+# Load environment variables from .env if available
+load_dotenv()
 
-class GitHubAgent(GrocAgent):
+# Set your Groclake credentials and GitHub token.
+# (These can also be set in your .env file.)
+os.environ["GROCLAKE_API_KEY"] = os.getenv(
+    "GROCLAKE_API_KEY", ""
+)
+os.environ["GROCLAKE_ACCOUNT_ID"] = os.getenv(
+    "GROCLAKE_ACCOUNT_ID", ""
+)
+
+# Initialize the Groclake components. In a RAG task the vector & data lakes can be used
+# to store and retrieve context if needed. Here we initialize them for completeness.
+vectorlake = VectorLake()
+datalake = DataLake()
+modellake = ModelLake()
+
+
+def call_modellake_chat(prompt):
+    """
+    Uses ModelLake to perform a chat completion.
+    The chat is augmented with any available retrieval context via Groclake’s
+    underlying vector and data lake (if configured).
+    """
+    chat_completion_request = {
+        "groc_account_id": os.environ.get("GROCLAKE_ACCOUNT_ID"),
+        "messages": [
+            {
+                "role": "system",
+                "content": "You are a GitHub command parser. Output JSON.",
+            },
+            {"role": "user", "content": prompt},
+        ],
+    }
+    response = modellake.chat_complete(chat_completion_request)
+    answer = response.get("answer", "").strip()
+    return answer
+
+
+class GitHubAgent:
     def __init__(
         self,
         app,
@@ -43,14 +58,10 @@ class GitHubAgent(GrocAgent):
     ):
         if adaptor_config is None:
             adaptor_config = {}
-        super().__init__(
-            app,
-            agent_name,
-            initial_intent,
-            intent_description,
-            self.default_handler,
-            adaptor_config,
-        )
+        self.app = app
+        self.agent_name = agent_name
+        self.initial_intent = initial_intent
+        self.intent_description = intent_description
         self.token = os.getenv("GITHUB_TOKEN")
         if not self.token:
             raise ValueError("GITHUB_TOKEN environment variable is not set.")
@@ -65,25 +76,24 @@ class GitHubAgent(GrocAgent):
             query_text = payload.get("query_text", "No query provided")
             prompt = (
                 "Context: Available GitHub operations:\n"
-                "- create_repository: Create repo. Requires 'name' (string), optional 'description' (string), 'scope' (public/private), 'add_readme' (boolean).\n"
-                "- star_repository: Star a repo. Requires 'owner' (string), 'repo' (string).\n"
-                "- unstar_repository: Unstar a repo. Same parameters as star.\n"
-                "- list_repositories: List user's repos. No parameters.\n"
-                "- delete_repository: Delete a repo. Requires 'owner' and 'repo'.\n"
-                "- get_repository_details: Get repo info. Requires 'owner' and 'repo'.\n"
-                "- fork_repository: Fork a repo. Requires 'owner' and 'repo'.\n"
+                "- create_repository: Create a repository. Requires 'name' (string), optional 'description' (string), 'scope' (public/private), 'add_readme' (boolean).\n"
+                "- star_repository: Star a repository. Requires 'owner' (string), 'repo' (string).\n"
+                "- unstar_repository: Unstar a repository. (Same parameters as starring.)\n"
+                "- list_repositories: List the user’s repositories. No parameters.\n"
+                "- delete_repository: Delete a repository. Requires 'owner' and 'repo'.\n"
+                "- get_repository_details: Get repository details. Requires 'owner' and 'repo'.\n"
+                "- fork_repository: Fork a repository. Requires 'owner' and 'repo'.\n"
                 f"Command: {query_text}\n"
-                "Output a JSON object with 'operation' (exactly one of the above) and parameters.\n"
-                "Example 1: 'Create private repo test with README' -> {\"operation\": \"create_repository\", \"name\": \"test\", \"scope\": \"private\", \"add_readme\": true}\n"
-                "Example 2: 'Star octocat/hello' -> {\"operation\": \"star_repository\", \"owner\": \"octocat\", \"repo\": \"hello\"}\n"
+                "Output a JSON object with 'operation' (exactly one of the above) and any required parameters.\n"
+                'Example 1: \'Create private repo test with README\' -> {"operation": "create_repository", "name": "test", "scope": "private", "add_readme": true}\n'
+                'Example 2: \'Star octocat/hello\' -> {"operation": "star_repository", "owner": "octocat", "repo": "hello"}\n'
                 "Output only the JSON, no markdown or additional text."
             )
-            print(f"\nDEBUG: Prompt sent to Groq API:\n{prompt}\n")
+            print(f"\nDEBUG: Prompt sent to ModelLake:\n{prompt}\n")
+            answer = call_modellake_chat(prompt)
+            print(f"DEBUG: ModelLake response: {answer}\n")
 
-            answer = call_groq_chat(prompt)
-            print(f"DEBUG: Groq API response: {answer}\n")
-
-            # Remove surrounding markdown code fences if present
+            # Remove any surrounding markdown code fences if present
             if answer.startswith("```json"):
                 answer = answer[7:]
             if answer.endswith("```"):
@@ -124,7 +134,7 @@ class GitHubAgent(GrocAgent):
                 description = instructions.get("description", "")
                 scope = instructions.get("scope", "public").strip().lower()
                 add_readme = instructions.get("add_readme", False)
-                # Convert string booleans to actual booleans
+                # Ensure add_readme is a boolean
                 if isinstance(add_readme, str):
                     add_readme = add_readme.lower() == "true"
                 self.create_repository(name, description, scope, add_readme)
@@ -163,7 +173,9 @@ class GitHubAgent(GrocAgent):
                 repo = instructions.get("repo")
                 if not owner or not repo:
                     raise ValueError("Missing 'owner' or 'repo' for getting details.")
-                details_output = self.get_repository_details(return_output=True, owner=owner, repo=repo)
+                details_output = self.get_repository_details(
+                    return_output=True, owner=owner, repo=repo
+                )
                 response_text = details_output
                 status = 200
             elif operation == "fork_repository":
@@ -242,10 +254,7 @@ class GitHubAgent(GrocAgent):
                 output = "No repositories found."
         else:
             output = f"❌ Failed to fetch repositories. Status Code: {response.status_code}, Response: {response.text}"
-        if return_output:
-            return output
-        else:
-            print(output)
+        return output if return_output else print(output)
 
     def delete_repository(self, owner, repo):
         url = f"{self.base_url}/repos/{owner}/{repo}"
@@ -270,10 +279,7 @@ class GitHubAgent(GrocAgent):
             output += f"Forks: {details.get('forks_count', 0)}\n"
         else:
             output = f"❌ Failed to get details for {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}"
-        if return_output:
-            return output
-        else:
-            print(output)
+        return output if return_output else print(output)
 
     def fork_repository(self, owner, repo):
         url = f"{self.base_url}/repos/{owner}/{repo}/forks"
@@ -285,14 +291,18 @@ class GitHubAgent(GrocAgent):
                 f"❌ Failed to fork repository {owner}/{repo}. Status Code: {response.status_code}, Response: {response.text}"
             )
 
+
+# Initialize the Flask app and GitHubAgent
 app = Flask(__name__)
 github_agent = GitHubAgent(app, "GitHubAgent")
+
 
 @app.route("/agent", methods=["POST"])
 def agent_endpoint():
     payload = request.get_json()
     result = github_agent.default_handler(payload)
     return jsonify(result)
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
