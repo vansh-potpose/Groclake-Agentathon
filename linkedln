@@ -1,0 +1,135 @@
+import asyncio
+from playwright.async_api import async_playwright
+import requests
+import time
+
+# 🔐 LinkedIn Credentials (Replace with actual details)
+LINKEDIN_EMAIL = ""
+LINKEDIN_PASSWORD = "your_password"
+GROQ_API_KEY = "your_groq_api_key"
+
+class LinkedInAgent:
+    def __init__(self):
+        self.api_key = GROQ_API_KEY
+
+    # 🔐 Login function
+    async def login(self, page):
+        print("\n💻 Logging into LinkedIn...")
+        await page.goto("https://www.linkedin.com/login")
+        await page.fill("#username", LINKEDIN_EMAIL)
+        await page.fill("#password", LINKEDIN_PASSWORD)
+        await page.press("#password", "Enter")
+        await page.wait_for_load_state("networkidle")
+        print("✅ Logged in Successfully!")
+
+    # 🔍 Search Jobs function
+    async def search_jobs(self, page, keyword, location):
+        print(f"\n🔍 Searching for jobs: {keyword} in {location}...")
+        await page.goto("https://www.linkedin.com/jobs/")
+        await page.fill("input[aria-label='Search by title']", keyword)
+        await page.fill("input[aria-label='City']", location)
+        await page.press("input[aria-label='City']", "Enter")
+        await page.wait_for_load_state("networkidle")
+
+        jobs = await page.query_selector_all(".job-card-container")
+        print(f"🔍 Found {len(jobs)} jobs.")
+        return jobs[:5]
+
+    # 🤝 Send Connection Requests
+    async def send_connections(self, page, profile_urls):
+        print(f"\n🤝 Sending connection requests...")
+        for profile in profile_urls:
+            await page.goto(profile)
+            await asyncio.sleep(3)
+
+            try:
+                connect_button = await page.query_selector("//button[contains(text(),'Connect')]")
+                if connect_button:
+                    await connect_button.click()
+                    await asyncio.sleep(1)
+
+                    send_button = await page.query_selector("//button[contains(text(),'Send now')]")
+                    if send_button:
+                        await send_button.click()
+                        print(f"✅ Sent connection request to {profile}")
+                else:
+                    print(f"⚠ Already connected or button not found for {profile}")
+
+            except Exception as e:
+                print(f"❌ Error connecting with {profile}: {e}")
+            await asyncio.sleep(2)
+
+    # 📝 Generate LinkedIn Post using Groq API
+    def generate_linkedin_post(self, topic):
+        url = "https://api.groq.com/v1/chat/completions"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": "mixtral-8x7b",
+            "messages": [{"role": "system", "content": f"Write a professional LinkedIn post about {topic}."}]
+        }
+        response = requests.post(url, headers=headers, json=payload)
+        return response.json()["choices"][0]["message"]["content"]
+
+    # 💬 Comment on Post
+    async def comment_on_post(self, page, post_url, topic):
+        print(f"\n💬 Commenting on the post at {post_url}...")
+        await page.goto(post_url)
+        await asyncio.sleep(3)
+
+        comment = self.generate_linkedin_post(f"A brief insightful comment on {topic}.")
+        try:
+            comment_box = await page.query_selector("//textarea[contains(@aria-label, 'Add a comment')]")
+            if comment_box:
+                await comment_box.fill(comment)
+                await comment_box.press("Enter")
+                print(f"💬 Commented: {comment}")
+
+        except Exception as e:
+            print(f"❌ Failed to comment: {e}")
+
+    # 🚀 Main program that drives the agent
+    async def run(self):
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False)
+            page = await browser.new_page()
+            await self.login(page)
+
+            print("\n--- LinkedIn AI Agent ---")
+            while True:
+                # Ask user what they want to do
+                print("\nPlease choose an action:")
+                print("1. Search for Jobs")
+                print("2. Send Connection Requests")
+                print("3. Generate LinkedIn Post")
+                print("4. Comment on a LinkedIn Post")
+                print("5. Exit")
+                choice = input("Enter your choice (1-5): ")
+
+                if choice == '1':
+                    keyword = input("Enter the job title/keyword: ")
+                    location = input("Enter the job location: ")
+                    jobs = await self.search_jobs(page, keyword, location)
+                    print(f"Found the following jobs: {jobs}")
+                elif choice == '2':
+                    profile_urls = input("Enter profile URLs (comma separated): ").split(',')
+                    await self.send_connections(page, [url.strip() for url in profile_urls])
+                elif choice == '3':
+                    topic = input("Enter the topic for your LinkedIn post: ")
+                    post = self.generate_linkedin_post(topic)
+                    print(f"Generated LinkedIn Post:\n{post}")
+                elif choice == '4':
+                    post_url = input("Enter the URL of the LinkedIn post: ")
+                    topic = input("Enter the topic for the comment: ")
+                    await self.comment_on_post(page, post_url, topic)
+                elif choice == '5':
+                    print("👋 Exiting...")
+                    break
+                else:
+                    print("❌ Invalid option. Please try again.")
+            
+            await browser.close()
+
+# 🚀 Initialize and run the LinkedIn Agent
+if __name__ == "__main__":
+    agent = LinkedInAgent()
+    asyncio.run(agent.run())
