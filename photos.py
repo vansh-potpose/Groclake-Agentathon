@@ -4,25 +4,25 @@ import requests
 from flask import Flask, request, jsonify, render_template_string
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
-from groclake.modellake import ModelLake
+from groclake.modellake import Modellake
 
 # --- Setup Environment Variables ---
 # These can be set externally or via a .env file.
 # For example:
-# os.environ['GROCLAKE_API_KEY'] = "140f6969d5213fd0ece03148e62e461e"
-# os.environ['GROCLAKE_ACCOUNT_ID'] = "72aea028970a23b6530c7faa987905e0"
+# os.environ['GROClake_API_KEY'] = ""
+# os.environ['GROClake_ACCOUNT_ID'] = ""
 # os.environ['GROQ_API_KEY'] is not needed now.
 
-# --- Initialize ModelLake for LLM Integration ---
-modellake = ModelLake()
+# --- Initialize Modellake for LLM Integration ---
+modellake = Modellake()
 
 def call_llm_chat(prompt):
     """
-    Uses ModelLake's chat_complete method to process the prompt.
+    Uses Modellake's chat_complete method to process the prompt.
     Returns the answer as a string.
     """
     chat_completion_request = {
-        "groc_account_id": os.environ.get("GROCLAKE_ACCOUNT_ID"),
+        "groc_account_id": os.environ.get("GROClake_ACCOUNT_ID"),
         "messages": [
             {"role": "system", "content": "You are a photo command parser. Output valid JSON."},
             {"role": "user", "content": prompt}
@@ -103,7 +103,7 @@ class PhotoAgent:
         Processes incoming requests.
         Expected payload contains:
           - query_text: A natural language command (e.g., "give me images of night")
-        Uses enhanced keyword matching and the LLM (via ModelLake) to convert the query into a structured command.
+        Uses enhanced keyword matching and the LLM (via Modellake) to convert the query into a structured command.
         """
         try:
             query_text = payload.get("query_text", "").strip()
@@ -137,9 +137,9 @@ class PhotoAgent:
                     f"Query: \"{query_text}\"\n"
                     "Return JSON with key 'operation' and include additional keys if needed. Output only valid JSON."
                 )
-                print(f"DEBUG: Prompt sent to ModelLake:\n{prompt}\n")
+                print(f"DEBUG: Prompt sent to Modellake:\n{prompt}\n")
                 llm_response = call_llm_chat(prompt)
-                print(f"DEBUG: ModelLake response: {llm_response}\n")
+                print(f"DEBUG: Modellake response: {llm_response}\n")
                 instructions = json.loads(llm_response)
                 print(f"DEBUG: Parsed instructions: {instructions}\n")
                 operation = instructions.get("operation", "").strip().lower()
