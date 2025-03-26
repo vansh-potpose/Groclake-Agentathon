@@ -1,36 +1,102 @@
 import os
 import json
 import requests
-from flask import Flask, request, jsonify, render_template_string
+import streamlit as st
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from groclake.modellake import Modellake
 
-# --- Setup Environment Variables ---
-# These can be set externally or via a .env file.
-# For example:
-# os.environ['GROClake_API_KEY'] = ""
-# os.environ['GROClake_ACCOUNT_ID'] = ""
-# os.environ['GROQ_API_KEY'] is not needed now.
+# --- Page Configuration ---
+st.set_page_config(
+    page_title="Photo Assistant",
+    page_icon="📸",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- Custom CSS ---
+st.markdown("""
+    <style>
+    .stButton > button {
+        width: 100%;
+        border-radius: 5px;
+        height: 3em;
+        background-color: #FF4B4B;
+        color: white;
+        border: none;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        background-color: #FF6B6B;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+    }
+    .main > div {
+        padding: 2em;
+        border-radius: 10px;
+        background-color: #ffffff;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .css-1d391kg {
+        padding: 2em;
+    }
+    .stTextInput > div > div > input {
+        background-color: #f0f2f6;
+        border-radius: 5px;
+        padding: 1em;
+        font-size: 1.1em;
+    }
+    .stTab {
+        background-color: #ffffff;
+        border-radius: 5px;
+        padding: 1em;
+        margin-bottom: 1em;
+    }
+    .photo-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+        gap: 1.5rem;
+        padding: 1rem;
+    }
+    .photo-card {
+        background: white;
+        border-radius: 10px;
+        overflow: hidden;
+        transition: transform 0.2s;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    .photo-card:hover {
+        transform: translateY(-5px);
+    }
+    .sidebar .sidebar-content {
+        background-color: #f8f9fa;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # --- Initialize Modellake for LLM Integration ---
-modellake = Modellake()
+@st.cache_resource
+def init_modellake():
+    return Modellake()
+
+modellake = init_modellake()
 
 def call_llm_chat(prompt):
-    """
-    Uses Modellake's chat_complete method to process the prompt.
-    Returns the answer as a string.
-    """
-    chat_completion_request = {
-        "groc_account_id": os.environ.get("GROClake_ACCOUNT_ID"),
-        "messages": [
-            {"role": "system", "content": "You are a photo command parser. Output valid JSON."},
-            {"role": "user", "content": prompt}
-        ]
-    }
-    response = modellake.chat_complete(chat_completion_request)
-    answer = response.get("answer", "").strip()
-    return answer
+    """Uses Modellake's chat_complete method to process the prompt."""
+    try:
+        chat_completion_request = {
+            "groc_account_id": os.environ.get("GROCLAKE_ACCOUNT_ID"),
+            "messages": [
+                {"role": "system", "content": "You are a photo command parser. Output valid JSON."},
+                {"role": "user", "content": prompt}
+            ]
+        }
+        response = modellake.chat_complete(chat_completion_request)
+        return response.get("answer", "").strip()
+    except Exception as e:
+        st.error(f"Error processing chat request: {str(e)}")
+        return None
 
 # --- Google Photos API Setup ---
 SCOPES = [
@@ -38,203 +104,236 @@ SCOPES = [
     "https://www.googleapis.com/auth/photoslibrary.readonly",
     "https://www.googleapis.com/auth/photoslibrary.edit.appcreateddata"
 ]
-CREDENTIALS_FILE = "credentials.json"  # Your OAuth credentials file
-TOKEN_FILE = "token.json"              # File to store the OAuth token
+CREDENTIALS_FILE = "credentials.json"
+TOKEN_FILE = "token.json"
 
+@st.cache_resource
 def authenticate():
     """Authenticate and return Google Photos API credentials."""
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-        creds = flow.run_local_server(port=8080)
-        with open(TOKEN_FILE, "w") as token:
-            token.write(creds.to_json())
-    return creds
+    try:
+        creds = None
+        if os.path.exists(TOKEN_FILE):
+            creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        if not creds or not creds.valid:
+            if not os.path.exists(CREDENTIALS_FILE):
+                st.error("credentials.json file not found. Please ensure it exists in the project directory.")
+                return None
+            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
+            creds = flow.run_local_server(port=8080)
+            with open(TOKEN_FILE, "w") as token:
+                token.write(creds.to_json())
+        return creds
+    except Exception as e:
+        st.error(f"Authentication error: {str(e)}")
+        return None
 
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def list_photos():
     """Fetch and return recent photos from Google Photos."""
     creds = authenticate()
-    url = "https://photoslibrary.googleapis.com/v1/mediaItems"
-    headers = {"Authorization": f"Bearer {creds.token}"}
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get("mediaItems", [])
-    return None
+    if not creds:
+        return None
+    
+    try:
+        url = "https://photoslibrary.googleapis.com/v1/mediaItems"
+        headers = {"Authorization": f"Bearer {creds.token}"}
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get("mediaItems", [])
+        st.error(f"API Error: {response.status_code}")
+        return None
+    except Exception as e:
+        st.error(f"Error fetching photos: {str(e)}")
+        return None
 
-def search_photos_by_tag_parameter(tag):
-    """Search for photos using a given tag and return matching photos."""
+@st.cache_data(ttl=300)
+def search_photos(tag):
+    """Search for photos using a given tag."""
     creds = authenticate()
-    url = "https://photoslibrary.googleapis.com/v1/mediaItems:search"
-    headers = {"Authorization": f"Bearer {creds.token}"}
-    data = {"filters": {"contentFilter": {"includedContentCategories": [tag]}}}
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code == 200:
-        return response.json().get("mediaItems", [])
-    return None
+    if not creds:
+        return None
+    
+    try:
+        url = "https://photoslibrary.googleapis.com/v1/mediaItems:search"
+        headers = {"Authorization": f"Bearer {creds.token}"}
+        data = {"filters": {"contentFilter": {"includedContentCategories": [tag]}}}
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            return response.json().get("mediaItems", [])
+        st.error(f"API Error: {response.status_code}")
+        return None
+    except Exception as e:
+        st.error(f"Error searching photos: {str(e)}")
+        return None
 
 def create_album(album_name):
-    """Create a new album in Google Photos and return its album ID."""
+    """Create a new album in Google Photos."""
     creds = authenticate()
-    url = "https://photoslibrary.googleapis.com/v1/albums"
-    headers = {"Authorization": f"Bearer {creds.token}"}
-    data = {"album": {"title": album_name}}
-    response = requests.post(url, headers=headers, json=data)
-    if response.status_code == 200:
-        return response.json().get("id")
-    return None
+    if not creds:
+        return None
+    
+    try:
+        url = "https://photoslibrary.googleapis.com/v1/albums"
+        headers = {"Authorization": f"Bearer {creds.token}"}
+        data = {"album": {"title": album_name}}
+        response = requests.post(url, headers=headers, json=data)
+        if response.status_code == 200:
+            return response.json().get("id")
+        st.error(f"API Error: {response.status_code}")
+        return None
+    except Exception as e:
+        st.error(f"Error creating album: {str(e)}")
+        return None
 
+@st.cache_data(ttl=300)
 def list_albums():
     """List all user-created albums."""
     creds = authenticate()
-    url = "https://photoslibrary.googleapis.com/v1/albums"
-    headers = {"Authorization": f"Bearer {creds.token}"}
-    response = requests.get(url, headers=headers)
-    if response.status_code == 200:
-        return response.json().get("albums", [])
-    return None
+    if not creds:
+        return None
+    
+    try:
+        url = "https://photoslibrary.googleapis.com/v1/albums"
+        headers = {"Authorization": f"Bearer {creds.token}"}
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            return response.json().get("albums", [])
+        st.error(f"API Error: {response.status_code}")
+        return None
+    except Exception as e:
+        st.error(f"Error listing albums: {str(e)}")
+        return None
 
-# --- Photo Agent Class ---
-# In this lean version we define our own PhotoAgent class without using a GrocAgent base.
-class PhotoAgent:
-    def default_handler(self, payload):
-        """
-        Processes incoming requests.
-        Expected payload contains:
-          - query_text: A natural language command (e.g., "give me images of night")
-        Uses enhanced keyword matching and the LLM (via Modellake) to convert the query into a structured command.
-        """
-        try:
-            query_text = payload.get("query_text", "").strip()
-            lower_query = query_text.lower()
-            # Enhanced keyword matching:
-            if "list photos" in lower_query or "list images" in lower_query:
-                operation = "list photos"
-                metadata = payload.get("metadata", {})
-            elif ("search photos" in lower_query or "search images" in lower_query or
-                  "seach photos" in lower_query or "seach images" in lower_query or
-                  (("search" in lower_query or "seach" in lower_query) and ("photo" in lower_query or "image" in lower_query))):
-                operation = "search photos"
-                metadata = payload.get("metadata", {})
-                tag = metadata.get("tag", "")
-                if not tag:
-                    phrase = "search images of "
-                    if phrase in lower_query:
-                        tag = lower_query.split(phrase)[-1].strip()
-                        metadata["tag"] = tag
-            elif "create album" in lower_query:
-                operation = "create album"
-                metadata = payload.get("metadata", {})
-            elif "list albums" in lower_query:
-                operation = "list albums"
-                metadata = payload.get("metadata", {})
-            else:
-                # Use LLM to parse the natural language query.
-                prompt = (
-                    "Convert the following natural language query into a JSON command for a photo agent that supports "
-                    "'list photos', 'search photos' (with tag), 'create album' (with album_name), and 'list albums'.\n"
-                    f"Query: \"{query_text}\"\n"
-                    "Return JSON with key 'operation' and include additional keys if needed. Output only valid JSON."
-                )
-                print(f"DEBUG: Prompt sent to Modellake:\n{prompt}\n")
-                llm_response = call_llm_chat(prompt)
-                print(f"DEBUG: Modellake response: {llm_response}\n")
-                instructions = json.loads(llm_response)
-                print(f"DEBUG: Parsed instructions: {instructions}\n")
-                operation = instructions.get("operation", "").strip().lower()
-                metadata = {k: instructions[k] for k in ["tag", "album_name"] if k in instructions}
-            
-            # Process the structured command.
-            if operation == "list photos":
-                photos = list_photos()
-                if photos is None:
-                    return {"response_text": "Failed to fetch photos."}
-                photo_list = [{"filename": p.get("filename", "Unnamed"), "url": p.get("baseUrl", "")} for p in photos[:10]]
-                return {"response_text": "Recent photos:", "photos": photo_list}
-            elif operation == "search photos":
-                tag = metadata.get("tag", "")
-                if not tag:
-                    return {"response_text": "Please provide a tag for searching."}
-                photos = search_photos_by_tag_parameter(tag)
-                if not photos:
-                    return {"response_text": f"No photos found with tag '{tag}'."}
-                photo_list = [{"filename": p.get("filename", "Unnamed"), "url": p.get("baseUrl", "")} for p in photos]
-                return {"response_text": f"Photos with tag '{tag}':", "photos": photo_list}
-            elif operation == "create album":
-                album_name = metadata.get("album_name", "New Album")
-                album_id = create_album(album_name)
-                if album_id:
-                    return {"response_text": f"Album '{album_name}' created successfully!", "album_id": album_id}
-                return {"response_text": "Failed to create album."}
-            elif operation == "list albums":
-                albums = list_albums()
-                if not albums:
-                    return {"response_text": "No albums found."}
-                album_list = [{"title": a.get("title", "Unnamed"), "id": a.get("id", "")} for a in albums]
-                return {"response_text": "Your albums:", "albums": album_list}
-            else:
-                return {"response_text": "Operation not recognized.", "query_text": query_text}
-        except Exception as e:
-            return {"response_text": f"Error: {str(e)}", "query_text": query_text}
+def display_photos(photos, columns=3):
+    """Display photos in a responsive grid."""
+    if not photos:
+        return
+    
+    cols = st.columns(columns)
+    for idx, photo in enumerate(photos[:12]):  # Show up to 12 photos
+        with cols[idx % columns]:
+            st.image(
+                photo.get("baseUrl", ""),
+                caption=photo.get("filename", ""),
+                use_container_width=True
+            )
+            with st.expander("Photo Details"):
+                st.write(f"📅 Created: {photo.get('mediaMetadata', {}).get('creationTime', 'Unknown')}")
+                st.write(f"📏 Dimensions: {photo.get('mediaMetadata', {}).get('width', '?')}x{photo.get('mediaMetadata', {}).get('height', '?')}")
 
-# --- Flask Application Setup ---
-app = Flask(__name__)
-photo_agent = PhotoAgent()
-
-@app.route("/", methods=["GET", "POST"])
-def index():
-    response = None
-    if request.method == "POST":
-        command = request.form.get("command")
-        payload = {"query_text": command}
-        response = photo_agent.default_handler(payload)
-    html = '''
-    <!DOCTYPE html>
-    <html>
-      <head>
-        <title>Google Photos Agent</title>
-        <style>
-          body { font-family: Arial, sans-serif; margin: 20px; }
-          label { display: block; margin-top: 10px; }
-          .field { margin-bottom: 10px; }
-        </style>
-      </head>
-      <body>
-        <h1>Google Photos Agent</h1>
-        <form method="POST">
-          <div class="field">
-            <label for="command">Enter your command (e.g., "give me images of night"):</label>
-            <input type="text" id="command" name="command" placeholder="Enter your command here">
-          </div>
-          <button type="submit">Send Command</button>
-        </form>
-        {% if response %}
-          <h2>Response:</h2>
-          {% if response.photos %}
-            <h3>Photos:</h3>
-            <div>
-              {% for photo in response.photos %}
-                <div style="display:inline-block; margin:10px; text-align:center;">
-                  <img src="{{ photo.url }}" alt="{{ photo.filename }}" style="max-width:200px; max-height:200px;"><br>
-                  <span>{{ photo.filename }}</span>
-                </div>
-              {% endfor %}
-            </div>
-          {% else %}
-            <pre>{{ response|tojson(indent=2) }}</pre>
-          {% endif %}
-        {% endif %}
-      </body>
-    </html>
-    '''
-    return render_template_string(html, response=response)
-
-@app.route("/agent", methods=["POST"])
-def agent_endpoint():
-    payload = request.get_json(force=True)
-    result = photo_agent.default_handler(payload)
-    return jsonify(result)
+def main():
+    # Sidebar
+    with st.sidebar:
+        st.image("https://images.unsplash.com/photo-1552168324-d612d77725e3?auto=format&fit=crop&w=300&q=80", 
+                 use_container_width=True)
+        st.markdown("---")
+        st.markdown("""
+        ### 🎯 Quick Commands
+        
+        ```python
+        list photos
+        search images of [tag]
+        create album [name]
+        list albums
+        ```
+        """)
+        st.markdown("---")
+        st.markdown("### 📊 Stats")
+        if albums := list_albums():
+            st.metric("Total Albums", len(albums))
+    
+    # Main content
+    st.title("📸 Photo Assistant")
+    st.markdown("""
+    Welcome to your personal photo management assistant! 
+    Use natural language commands to manage your Google Photos library efficiently.
+    """)
+    
+    # Command input with tabs
+    tab1, tab2 = st.tabs(["💬 Command Center", "ℹ️ Help & Documentation"])
+    
+    with tab1:
+        command = st.text_input(
+            "Enter your command:",
+            placeholder="Try 'list photos' or 'search images of sunset'",
+            key="command_input"
+        )
+        
+        execute = st.button("Execute Command", key="execute_btn", use_container_width=True)
+        
+        if execute:
+            with st.spinner("🔄 Processing your request..."):
+                query_text = command.strip().lower()
+                
+                # Command processing
+                if "list photos" in query_text:
+                    if photos := list_photos():
+                        st.success("📸 Here are your recent photos:")
+                        display_photos(photos)
+                    else:
+                        st.error("No photos found or error occurred.")
+                        
+                elif "search images" in query_text or "search photos" in query_text:
+                    tag = query_text.split("of")[-1].strip()
+                    st.info(f"🔍 Searching for photos matching: '{tag}'")
+                    if photos := search_photos(tag):
+                        st.success(f"Found {len(photos)} matching photos:")
+                        display_photos(photos)
+                    else:
+                        st.warning(f"No photos found matching '{tag}'")
+                        
+                elif "create album" in query_text:
+                    album_name = query_text.split("create album")[-1].strip() or "New Album"
+                    with st.spinner(f"Creating album '{album_name}'..."):
+                        if album_id := create_album(album_name):
+                            st.success(f"✨ Album '{album_name}' created successfully!")
+                            st.balloons()
+                        else:
+                            st.error("Failed to create album.")
+                        
+                elif "list albums" in query_text:
+                    if albums := list_albums():
+                        st.success("📚 Your Albums:")
+                        for album in albums:
+                            with st.expander(f"📁 {album.get('title', 'Unnamed')}"):
+                                st.write(f"📅 Created: {album.get('creationTime', 'Unknown')}")
+                                st.write(f"📸 Total items: {album.get('mediaItemsCount', '0')}")
+                                if album.get('coverPhotoBaseUrl'):
+                                    st.image(album['coverPhotoBaseUrl'], use_container_width=True)
+                    else:
+                        st.info("No albums found.")
+                else:
+                    st.error("⚠️ Command not recognized. Please check the help tab for available commands.")
+    
+    with tab2:
+        st.markdown("""
+        ### 📚 Available Commands
+        
+        1. **List Recent Photos**
+           - Command: `list photos`
+           - Shows your most recent photos in a grid layout
+           - Includes photo details and metadata
+        
+        2. **Search Photos**
+           - Command: `search images of [what you're looking for]`
+           - Example: `search images of sunset`
+           - Searches through your entire photo library
+        
+        3. **Create Album**
+           - Command: `create album [album name]`
+           - Example: `create album Summer Vacation 2025`
+           - Creates a new album in your Google Photos
+        
+        4. **List Albums**
+           - Command: `list albums`
+           - Shows all your albums with details
+           - Includes cover photos and item counts
+        
+        ### 💡 Tips
+        - Commands are case-insensitive
+        - Use natural language in your commands
+        - Check the sidebar for quick command reference
+        """)
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    main()
